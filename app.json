@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "Wine About It",
+    "slug": "wineaboutit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#722F37"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.wineaboutit.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#722F37"
+      },
+      "package": "com.wineaboutit.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Wine About It needs access to your photos to add wines to your cellar.",
+          "cameraPermission": "Wine About It needs access to your camera to photograph your wines."
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "scheme": "wineaboutit",
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
