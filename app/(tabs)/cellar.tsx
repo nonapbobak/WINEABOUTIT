@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  FlatList, Dimensions, Modal, TextInput, ActivityIndicator, Alert,
+  FlatList, Dimensions, Modal, TextInput, ActivityIndicator,
+  Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
+import { scanWineLabel } from '@/lib/scanLabel';
 import { GrapeRating } from '@/components/GrapeRating';
 import { colors, typography, spacing, borderRadius, shadows } from '@/lib/theme';
 import type { Wine, WineType } from '@/types';
@@ -51,6 +53,7 @@ function AddWineModal({
   const [location, setLocation] = useState('');
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     if (query.length < 1) { setResults([]); return; }
@@ -58,13 +61,52 @@ function AddWineModal({
       setSearching(true);
       const { data } = await supabase
         .from('wines').select('*')
-        .or(`name.ilike.%${query}%,winery.ilike.%${query}%`)
-        .limit(10);
+        .or(`name.ilike.%${query}%,winery.ilike.%${query}%,region.ilike.%${query}%`)
+        .order('average_rating', { ascending: false })
+        .limit(15);
       setResults((data as Wine[]) ?? []);
       setSearching(false);
     }, 300);
     return () => clearTimeout(t);
   }, [query]);
+
+  async function handleScan(source: 'camera' | 'library') {
+    setScanning(true);
+    const scanned = await scanWineLabel(source);
+    setScanning(false);
+    if (!scanned) return;
+
+    // Try to find in database
+    const { data: matches } = await supabase
+      .from('wines').select('*')
+      .ilike('name', `%${scanned.name}%`)
+      .ilike('winery', `%${scanned.winery}%`)
+      .limit(1);
+
+    if (matches && matches.length > 0) {
+      selectWine(matches[0] as Wine);
+    } else {
+      // Wine not in DB — create it
+      const { data: newWine, error } = await supabase
+        .from('wines')
+        .insert({
+          name: scanned.name,
+          winery: scanned.winery,
+          vintage: scanned.vintage,
+          type: scanned.type,
+          region: scanned.region || 'Unknown',
+          country: scanned.country || 'Unknown',
+          description: scanned.description || null,
+          created_by: userId,
+        })
+        .select()
+        .single();
+      if (!error && newWine) {
+        selectWine(newWine as Wine);
+        Alert.alert('New wine added! 🍷', `${scanned.name} was added to the wine database.`);
+      }
+    }
+  }
 
   function selectWine(wine: Wine) {
     setSelectedWine(wine);
@@ -83,8 +125,7 @@ function AddWineModal({
 
     const { error } = existing
       ? await supabase.from('cellar_items')
-          .update({ quantity: existing.quantity + qty })
-          .eq('id', existing.id)
+          .update({ quantity: existing.quantity + qty }).eq('id', existing.id)
       : await supabase.from('cellar_items').insert({
           user_id: userId, wine_id: selectedWine.id, quantity: qty,
           purchase_price: price ? parseFloat(price) : null,
@@ -99,106 +140,162 @@ function AddWineModal({
 
   function handleClose() {
     setStep('search'); setQuery(''); setResults([]);
-    setSelectedWine(null); setQuantity('1'); setPrice('');
-    setNotes(''); setLocation('');
+    setSelectedWine(null); setQuantity('1');
+    setPrice(''); setNotes(''); setLocation('');
     onClose();
   }
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
-      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={handleClose} />
-      <View style={styles.modalSheet}>
-        <View style={styles.modalHandle} />
+      <View style={{ flex: 1 }}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={handleClose} />
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
 
-        {step === 'search' ? (
-          <>
-            <Text style={styles.modalTitle}>Add Wine to Cellar</Text>
-            <View style={styles.searchBar}>
-              <Ionicons name="search" size={16} color={colors.textMuted} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search by wine name or winery..."
-                placeholderTextColor={colors.textMuted}
-                value={query}
-                onChangeText={setQuery}
-                autoFocus
-              />
-              {searching && <ActivityIndicator size="small" color={colors.wine} />}
-            </View>
+            {step === 'search' ? (
+              <>
+                <Text style={styles.modalTitle}>Add Wine to Cellar</Text>
 
-            {results.length > 0 ? (
-              <ScrollView style={styles.searchResults} keyboardShouldPersistTaps="handled">
-                {results.map((wine) => (
-                  <TouchableOpacity key={wine.id} style={styles.searchResultItem} onPress={() => selectWine(wine)}>
-                    <View style={[styles.resultDot, { backgroundColor: TYPE_COLORS[wine.type] + '40' }]}>
-                      <Text style={{ fontSize: 20 }}>🍷</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.resultName}>{wine.name}</Text>
-                      <Text style={styles.resultSub}>{wine.winery} · {wine.vintage ?? 'NV'}</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                {/* Scan buttons */}
+                <View style={styles.scanRow}>
+                  <TouchableOpacity
+                    style={[styles.scanBtn, scanning && { opacity: 0.5 }]}
+                    onPress={() => handleScan('camera')}
+                    disabled={scanning}
+                  >
+                    {scanning
+                      ? <ActivityIndicator size="small" color={colors.wine} />
+                      : <Ionicons name="camera" size={20} color={colors.wine} />}
+                    <Text style={styles.scanBtnText}>
+                      {scanning ? 'Scanning...' : 'Scan Label'}
+                    </Text>
                   </TouchableOpacity>
-                ))}
-              </ScrollView>
-            ) : query.length > 0 && !searching ? (
-              <View style={styles.noResults}>
-                <Text style={styles.noResultsText}>No wines found for "{query}"</Text>
-                <Text style={styles.noResultsSub}>Try searching by winery or region</Text>
-              </View>
-            ) : null}
-          </>
-        ) : (
-          <>
-            <TouchableOpacity onPress={() => setStep('search')} style={styles.backBtn}>
-              <Ionicons name="chevron-back" size={20} color={colors.wine} />
-              <Text style={styles.backBtnText}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>{selectedWine?.name}</Text>
-            <Text style={styles.modalSubtitle}>{selectedWine?.winery} · {selectedWine?.vintage ?? 'NV'}</Text>
+                  <TouchableOpacity
+                    style={styles.scanBtn}
+                    onPress={() => handleScan('library')}
+                    disabled={scanning}
+                  >
+                    <Ionicons name="images" size={20} color={colors.wine} />
+                    <Text style={styles.scanBtnText}>From Photos</Text>
+                  </TouchableOpacity>
+                </View>
 
-            <View style={styles.modalRow}>
-              <View style={[styles.modalField, { flex: 1 }]}>
-                <Text style={styles.modalLabel}>Bottles</Text>
-                <TextInput
-                  style={styles.modalInput} value={quantity}
-                  onChangeText={setQuantity} keyboardType="number-pad" placeholder="1"
-                  placeholderTextColor={colors.textMuted}
-                />
-              </View>
-              <View style={[styles.modalField, { flex: 2 }]}>
-                <Text style={styles.modalLabel}>Price per Bottle</Text>
-                <TextInput
-                  style={styles.modalInput} value={price}
-                  onChangeText={setPrice} keyboardType="decimal-pad" placeholder="$0.00"
-                  placeholderTextColor={colors.textMuted}
-                />
-              </View>
-            </View>
-            <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>Storage Location</Text>
-              <TextInput
-                style={styles.modalInput} value={location}
-                onChangeText={setLocation} placeholder='e.g. "Wine fridge", "Rack 2"'
-                placeholderTextColor={colors.textMuted}
-              />
-            </View>
-            <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>Notes</Text>
-              <TextInput
-                style={[styles.modalInput, { height: 72, textAlignVertical: 'top' }]}
-                value={notes} onChangeText={setNotes} multiline
-                placeholder="Occasion, where you got it, thoughts..."
-                placeholderTextColor={colors.textMuted}
-              />
-            </View>
-            <TouchableOpacity style={[styles.modalBtn, saving && { opacity: 0.6 }]} onPress={handleSave} disabled={saving}>
-              {saving
-                ? <ActivityIndicator color={colors.white} />
-                : <Text style={styles.modalBtnText}>Add to My Cellar 🍷</Text>}
-            </TouchableOpacity>
-          </>
-        )}
+                <View style={styles.orDivider}>
+                  <View style={styles.orLine} />
+                  <Text style={styles.orText}>or search</Text>
+                  <View style={styles.orLine} />
+                </View>
+
+                {/* Search bar */}
+                <View style={styles.searchBar}>
+                  <Ionicons name="search" size={16} color={colors.textMuted} />
+                  <TextInput
+                    style={styles.searchInput}
+                    placeholder="Wine name, winery, or region..."
+                    placeholderTextColor={colors.textMuted}
+                    value={query}
+                    onChangeText={setQuery}
+                    autoCorrect={false}
+                  />
+                  {searching
+                    ? <ActivityIndicator size="small" color={colors.wine} />
+                    : query.length > 0
+                    ? <TouchableOpacity onPress={() => setQuery('')}>
+                        <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                      </TouchableOpacity>
+                    : null}
+                </View>
+
+                <ScrollView
+                  style={styles.searchResults}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {results.map((wine) => (
+                    <TouchableOpacity key={wine.id} style={styles.searchResultItem} onPress={() => selectWine(wine)}>
+                      <View style={[styles.resultDot, { backgroundColor: (TYPE_COLORS[wine.type] ?? colors.wine) + '30' }]}>
+                        <Text style={{ fontSize: 18 }}>🍷</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.resultName} numberOfLines={1}>{wine.name}</Text>
+                        <Text style={styles.resultSub}>{wine.winery} · {wine.vintage ?? 'NV'} · {wine.region}</Text>
+                      </View>
+                      <GrapeRating rating={wine.average_rating} size="sm" />
+                    </TouchableOpacity>
+                  ))}
+                  {query.length > 1 && results.length === 0 && !searching && (
+                    <View style={styles.noResults}>
+                      <Text style={styles.noResultsText}>No wines found for "{query}"</Text>
+                      <Text style={styles.noResultsSub}>Try scanning the label instead</Text>
+                    </View>
+                  )}
+                </ScrollView>
+              </>
+            ) : (
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                <TouchableOpacity onPress={() => setStep('search')} style={styles.backBtn}>
+                  <Ionicons name="chevron-back" size={20} color={colors.wine} />
+                  <Text style={styles.backBtnText}>Back</Text>
+                </TouchableOpacity>
+
+                <View style={styles.selectedWineBox}>
+                  <Text style={styles.selectedWineName}>{selectedWine?.name}</Text>
+                  <Text style={styles.selectedWineDetail}>
+                    {selectedWine?.winery} · {selectedWine?.vintage ?? 'NV'} · {selectedWine?.region}
+                  </Text>
+                  <GrapeRating rating={selectedWine?.average_rating ?? 0} size="sm" />
+                </View>
+
+                <View style={styles.modalRow}>
+                  <View style={[styles.modalField, { flex: 1 }]}>
+                    <Text style={styles.modalLabel}>Bottles</Text>
+                    <TextInput
+                      style={styles.modalInput} value={quantity}
+                      onChangeText={setQuantity} keyboardType="number-pad"
+                      placeholder="1" placeholderTextColor={colors.textMuted}
+                    />
+                  </View>
+                  <View style={[styles.modalField, { flex: 2 }]}>
+                    <Text style={styles.modalLabel}>Price per Bottle</Text>
+                    <TextInput
+                      style={styles.modalInput} value={price}
+                      onChangeText={setPrice} keyboardType="decimal-pad"
+                      placeholder="$0.00" placeholderTextColor={colors.textMuted}
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.modalField}>
+                  <Text style={styles.modalLabel}>Storage Location</Text>
+                  <TextInput
+                    style={styles.modalInput} value={location} onChangeText={setLocation}
+                    placeholder='e.g. "Wine fridge", "Rack 2"' placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+
+                <View style={styles.modalField}>
+                  <Text style={styles.modalLabel}>Notes</Text>
+                  <TextInput
+                    style={[styles.modalInput, { height: 72, textAlignVertical: 'top' }]}
+                    value={notes} onChangeText={setNotes} multiline
+                    placeholder="Occasion, where you got it, thoughts..."
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.modalBtn, saving && { opacity: 0.6 }]}
+                  onPress={handleSave} disabled={saving}
+                >
+                  {saving
+                    ? <ActivityIndicator color={colors.white} />
+                    : <Text style={styles.modalBtnText}>Add to My Cellar 🍷</Text>}
+                </TouchableOpacity>
+              </ScrollView>
+            )}
+          </View>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
@@ -228,8 +325,7 @@ export default function CellarScreen() {
   useEffect(() => { fetchCellar(); }, [fetchCellar]);
 
   const filtered = activeFilter === 'all'
-    ? cellar
-    : cellar.filter((item) => item.wine?.type === activeFilter);
+    ? cellar : cellar.filter((item) => item.wine?.type === activeFilter);
 
   const totalValue = cellar.reduce((sum, item) =>
     sum + (item.purchase_price ?? 0) * item.quantity, 0);
@@ -267,7 +363,10 @@ export default function CellarScreen() {
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll} contentContainerStyle={styles.filterContent}>
         {FILTERS.map((f) => (
-          <TouchableOpacity key={f.value} style={[styles.filterChip, activeFilter === f.value && styles.filterChipActive]} onPress={() => setActiveFilter(f.value)}>
+          <TouchableOpacity key={f.value}
+            style={[styles.filterChip, activeFilter === f.value && styles.filterChipActive]}
+            onPress={() => setActiveFilter(f.value)}
+          >
             <Text style={[styles.filterChipText, activeFilter === f.value && styles.filterChipTextActive]}>{f.label}</Text>
           </TouchableOpacity>
         ))}
@@ -301,9 +400,7 @@ export default function CellarScreen() {
                     <GrapeRating rating={item.wine?.average_rating ?? 0} size="sm" />
                   </View>
                   {item.purchase_price ? (
-                    <Text style={styles.cellarValue}>
-                      ${(item.purchase_price * item.quantity).toLocaleString()} total
-                    </Text>
+                    <Text style={styles.cellarValue}>${(item.purchase_price * item.quantity).toLocaleString()} total</Text>
                   ) : null}
                 </View>
               </TouchableOpacity>
@@ -375,26 +472,52 @@ const styles = StyleSheet.create({
   fabGradient: { width: 56, height: 56, justifyContent: 'center', alignItems: 'center' },
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
-  modalSheet: { backgroundColor: colors.surface, borderTopLeftRadius: borderRadius.xl, borderTopRightRadius: borderRadius.xl, padding: spacing.xl, paddingBottom: 40, maxHeight: '85%' },
+  modalSheet: {
+    backgroundColor: colors.surface, borderTopLeftRadius: borderRadius.xl,
+    borderTopRightRadius: borderRadius.xl, padding: spacing.xl, paddingBottom: 32, maxHeight: '88%',
+  },
   modalHandle: { width: 40, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: spacing.lg },
-  modalTitle: { fontSize: typography.sizes.xl, fontWeight: typography.weights.bold, color: colors.textPrimary, marginBottom: spacing.xs },
-  modalSubtitle: { fontSize: typography.sizes.sm, color: colors.textSecondary, marginBottom: spacing.lg },
-  searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.cream, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm, marginBottom: spacing.md },
+  modalTitle: { fontSize: typography.sizes.xl, fontWeight: typography.weights.bold, color: colors.textPrimary, marginBottom: spacing.md },
+  scanRow: { flexDirection: 'row', gap: spacing.md, marginBottom: spacing.md },
+  scanBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: spacing.sm, backgroundColor: colors.wine + '12', borderWidth: 1.5,
+    borderColor: colors.wine + '40', borderRadius: borderRadius.md, paddingVertical: spacing.md,
+  },
+  scanBtnText: { fontSize: typography.sizes.sm, fontWeight: typography.weights.semibold, color: colors.wine },
+  orDivider: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md },
+  orLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  orText: { fontSize: typography.sizes.xs, color: colors.textMuted, fontWeight: typography.weights.medium },
+  searchBar: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: colors.cream,
+    borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm, marginBottom: spacing.sm,
+  },
   searchInput: { flex: 1, fontSize: typography.sizes.base, color: colors.textPrimary, padding: 0 },
-  searchResults: { maxHeight: 280 },
-  searchResultItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.borderLight, gap: spacing.sm },
+  searchResults: { maxHeight: 220 },
+  searchResultItem: {
+    flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: colors.borderLight, gap: spacing.sm,
+  },
   resultDot: { width: 44, height: 44, borderRadius: borderRadius.md, justifyContent: 'center', alignItems: 'center' },
   resultName: { fontSize: typography.sizes.sm, fontWeight: typography.weights.semibold, color: colors.textPrimary },
-  resultSub: { fontSize: typography.sizes.xs, color: colors.textMuted },
+  resultSub: { fontSize: typography.sizes.xs, color: colors.textMuted, marginTop: 1 },
   noResults: { paddingVertical: spacing.xl, alignItems: 'center' },
   noResultsText: { fontSize: typography.sizes.sm, fontWeight: typography.weights.medium, color: colors.textSecondary },
   noResultsSub: { fontSize: typography.sizes.xs, color: colors.textMuted, marginTop: 4 },
-  backBtn: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
+  backBtn: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md },
   backBtnText: { fontSize: typography.sizes.sm, fontWeight: typography.weights.semibold, color: colors.wine },
+  selectedWineBox: { backgroundColor: colors.cream, borderRadius: borderRadius.md, padding: spacing.md, marginBottom: spacing.lg, gap: spacing.xs },
+  selectedWineName: { fontSize: typography.sizes.md, fontWeight: typography.weights.bold, color: colors.textPrimary },
+  selectedWineDetail: { fontSize: typography.sizes.sm, color: colors.textSecondary },
   modalRow: { flexDirection: 'row', gap: spacing.md },
   modalField: { marginBottom: spacing.md },
   modalLabel: { fontSize: typography.sizes.sm, fontWeight: typography.weights.semibold, color: colors.textSecondary, marginBottom: spacing.xs },
-  modalInput: { backgroundColor: colors.cream, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.md, fontSize: typography.sizes.base, color: colors.textPrimary },
-  modalBtn: { backgroundColor: colors.wine, borderRadius: borderRadius.md, paddingVertical: spacing.md, alignItems: 'center', marginTop: spacing.sm },
+  modalInput: {
+    backgroundColor: colors.cream, borderWidth: 1, borderColor: colors.border,
+    borderRadius: borderRadius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.md,
+    fontSize: typography.sizes.base, color: colors.textPrimary,
+  },
+  modalBtn: { backgroundColor: colors.wine, borderRadius: borderRadius.md, paddingVertical: spacing.md, alignItems: 'center', marginTop: spacing.sm, marginBottom: spacing.md },
   modalBtnText: { color: colors.white, fontSize: typography.sizes.md, fontWeight: typography.weights.bold },
 });
